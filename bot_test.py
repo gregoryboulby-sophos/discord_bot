@@ -5,6 +5,7 @@ import hashlib
 import requests
 import json
 import base64
+from urllib.parse import urlparse
 
 #Some globals.
 client = discord.Client()
@@ -23,8 +24,7 @@ def read_config():
 def get_file(url):
     return requests.get(url=url)
     
-def gen_sha256(url):
-       response = get_file(url)
+def gen_sha256(response):
        sha256_hash = hashlib.sha256()
        for chunk in response.iter_content(chunk_size= 1024):
             sha256_hash.update(chunk)
@@ -58,6 +58,31 @@ def intelix_url_lookup(url):
     file_url = "https://de.api.labs.sophos.com/lookup/urls/v1/%s" % (url)
     return requests.get(url=file_url, headers = {"Authorization": auth_credentials['token'],"X-Correlation-ID": "MyUniqueId"})
 
+def intelix_submit_static(file_content):
+    # Add token stuff
+    if not token_valid(auth_credentials):
+        print("Updating creds.")
+        intelix_get_token(cfg) 
+    else:
+        print("Creds up to date.") 
+
+    url = "https://de.api.labs.sophos.com/analysis/file/static/v1"
+    headers = {"Authorization": auth_credentials['token'],"X-Correlation-ID": "MyUniqueId"}
+    data = {'file': file_content}
+    return requests.post(url=url, headers=headers, files=data)
+
+def get_static_report(job_id):
+    # Add token stuff
+    if not token_valid(auth_credentials):
+        print("Updating creds.")
+        intelix_get_token(cfg) 
+    else:
+        print("Creds up to date.") 
+
+    url = "https://de.api.labs.sophos.com/analysis/file/static/v1/reports/{}".format(job_id)
+    headers = {"Authorization": auth_credentials['token'],"X-Correlation-ID": "MyUniqueId"}
+    return requests.get(url=url, headers=headers)
+
 
 def intelix_get_token(cfg):
     global auth_credentials
@@ -72,7 +97,62 @@ def intelix_get_token(cfg):
     auth_credentials =  {'token': response_json['access_token'],
                          'timestamp': int(time.time())
                         }
+def get_jobID(response):
+    response_json = json.loads(response.decode('utf-8'))
+    return response_json['jobId']
 
+def wait_for_analysis(job_id, scan_type='static'):
+    if scan_type == 'static':
+        while True:
+            report_response = get_static_report(job_id)
+            if report_response.status_code == 200:
+                return report_response
+            elif report_response.status_code == 202:
+                print('Job still in progress sleeping for 5 seconds...')
+                time.sleep(5)
+            else:
+                print('Something went wrong with the request')
+                break
+
+def get_static_score(static_response):
+    result = json.loads(static_response.content.decode('utf-8'))
+    return result['report']['score']
+
+def handle_scanning(file_content, scan_type='static'):
+    if scan_type == 'static':
+        submit_response = intelix_submit_static(file_content)
+        if submit_response.status_code == 200:
+            print('Static analysis complete returning results...')
+            return get_static_score(submit_response)
+        elif submit_response.status_code == 202:
+            print('Static analysis in progress waiting...')
+            job_id = get_jobID(submit_response.content)
+            static_result = wait_for_analysis(job_id)
+            return get_static_score(static_result)
+        elif submite_response.status == '413':
+            print('Request too large ignoring')
+        else:
+            print ('Problem with request {} Content: {}'.format(submit_response.status_code, submit_response.content))
+
+def get_domain(url):
+   parsed_url = urlparse(url)
+   return parsed_url.netloc
+
+def parse_file_lookup(lookup_response):
+    lookup = json.loads(lookup_response.decode('utf-8'))
+    try:
+        score = int(lookup['reputationScore'])
+        if score < 20:
+            risk = 'MALWARE'
+        elif score < 30:
+            risk = 'PUA'
+        elif score < 70:
+            risk = 'UNKNOWN'
+        else:
+            risk = 'GOOD'
+    except KeyError:
+        risk = 'UNKNOWN'
+    return risk
 
 @client.event
 async def on_message(message):
@@ -85,18 +165,30 @@ async def on_message(message):
         await message.channel.send('Mcafee') 
 
     if message.attachments:
-       url = message.attachments[0].url
-       sha256 = gen_sha256(url)
-       file_response = intelix_file_lookup(sha256)
-       await message.channel.send(file_response.content)
+        url = message.attachments[0].url
+        file_response = get_file(url)
+        sha256 = gen_sha256(file_response)
+        file_lookup_response = intelix_file_lookup(sha256)
+        file_risk = parse_file_lookup(file_lookup_response.content)
+        await message.channel.send(file_risk)
+        if file_risk == 'UNKNOWN':
+            await message.channel.send('We cor figure out what you uploaded. We are gooin to scan it.')
+            score = handle_scanning(file_response.content, scan_type='static')
+            if score < 50:
+                await message.channel.send('It looks like this file is bad so I have to delete it. I wish someone would delete me.')
+                await message.delete(delay=5)
+            else:
+                print('File looks non malicious')
+        elif file_risk == 'MALWARE':
+            print('File is malware deleting')
+            await message.delete(delay=5)
+        elif file.risk == 'PUA':
+            await message.channel.send("File is a potentially unwanted application and may be malicious. Proceed with caution or don't its up to you yo")
 
     urls = re.findall('http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+',message.content.lower())
     
     if urls:
-        if urls[0].startswith('https'):
-           url = urls[0][8:]
-        elif urls[0].startswith('http'):
-           url = urls[0][7:]
+        url = get_domain(urls[0])
         url_response = intelix_url_lookup(url)
         await message.channel.send(url_response.content)
         
