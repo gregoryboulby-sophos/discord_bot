@@ -7,6 +7,7 @@ import requests
 import json
 import base64
 import pickledb
+from urllib.parse import quote_plus
 from urllib.parse import urlparse
 
 #Some globals.
@@ -140,7 +141,10 @@ def intelix_url_lookup(url):
     else:
         print("Creds up to date.") 
 
-    file_url = "https://de.api.labs.sophos.com/lookup/urls/v1/%s" % (url)
+    encoded_url = quote_plus(url)
+
+    file_url = "https://de.api.labs.sophos.com/lookup/urls/v1/%s" % (encoded_url)
+    print(file_url)
     return requests.get(url=file_url, headers = {"Authorization": auth_credentials['token'],"X-Correlation-ID": "MyUniqueId"})
 
 def intelix_submit_static(file_content):
@@ -280,7 +284,7 @@ def handle_scanning(file_content, scan_type='static'):
 
 def get_domain(url):
    parsed_url = urlparse(url)
-   return parsed_url.netloc
+   return parsed_url.netloc + parsed_url.path
 
 def parse_file_lookup(lookup_response):
     lookup = json.loads(lookup_response.decode('utf-8'))
@@ -398,7 +402,10 @@ async def on_message(message):
         edited = False
         for url in urls:
             url = get_domain(url)
+            print('Checking ' + url)
+            
             url_response = intelix_url_lookup(url)
+            print(url_response.content)
             update_stats(db, 'url')
             risk, prod_cat = get_url_risk(url_response.content) 
             
